@@ -6,6 +6,7 @@ import math
 
 import os
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data.dataset as Dataset
 import torch.utils.data.dataloader as DataLoader
@@ -32,33 +33,50 @@ class CausalData(Dataset.Dataset):
         treat = torch.IntTensor(self.Treat[index])
         return predata, postdata, treat
 
+class lstmExtractor(torch.nn.Module):
+    def __init__(self, hidden_dim, input_dim=1):
+        super(lstmExtractor, self).__init__()
+        self.lstm = nn.LSTM(
+            input_size = input_dim, # time series feature dim
+            hidden_size = hidden_dim,   # latent dim
+            num_layers = 1,     # lstm layers
+            batch_first=True,   # input: (batch, seq_len, input_size), output: (batch, seq_len, hidden_size), (hn, cn)
+            dropout = 0.2,
+        )
 
-class Extractor(torch.nn.Module):
+    def forward(self, pretime):
+        pretime = pretime.unsqueeze(-1) # (batch, pretime_len, 1)
+        emb = self.lstm(pretime)[0]
+        emb = emb.transpose(1,2)   # (batch, seq_len, hidden_size) -> (batch, hidden_size, seq_len)
+        return emb[:,:,-1]  # the last timestep's emb: (batch, hidden_size)
+
+class nnExtractor(torch.nn.Module):
     def __init__(self, hidden_dim, input_dim=120):
-        super(Extractor, self).__init__()
+        super(nnExtractor, self).__init__()
         self.NN = torch.nn.Linear(input_dim, hidden_dim)
 
     def forward(self, pretime):
-        emb = self.NN(pretime)
+        emb = self.NN1(pretime)
         return emb
 
 
 class Predictor(torch.nn.Module):
     def __init__(self, hidden_dim, output_dim=20):
         super(Predictor, self).__init__()
-        self.NN = torch.nn.Linear(PARAM['Hidden'], output_dim)
+        #self.NN = torch.nn.Linear(PARAM['Hidden'], output_dim)
+        self.NN1 = torch.nn.Linear(PARAM['Hidden'], 8)
+        self.NN2 = torch.nn.Linear(8, output_dim)
 
     def forward(self, emb):
-        pred = self.NN(emb)
+        mid = self.NN1(emb)
+        pred = self.NN2(mid)
         return pred
-
-    def loss(self, y1_pred, y0_pred, y1, y0):
-        return F.mse_loss(y1_pred, y1) + F.mse_loss(y0_pred, y0)
 
 class MyModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.extractor = Extractor(input_dim=120, hidden_dim=PARAM['Hidden'])
+        # self.extractor = nnExtractor(input_dim=120, hidden_dim=PARAM['Hidden'])
+        self.extractor = lstmExtractor(hidden_dim=PARAM['Hidden'])
         self.predictor0 = Predictor(hidden_dim=PARAM['Hidden'])
         self.predictor1 = Predictor(hidden_dim=PARAM['Hidden'])
 
@@ -103,7 +121,6 @@ def main():
 
     dt_train = CausalData(preTime, postTime, T)
     dt_test = CausalData(preTime, counterpostTime, Tc)
-    print(len(Tc))
 
     trainset = DataLoader.DataLoader(dt_train, batch_size=PARAM['batch_size'], shuffle=True)
     testset = DataLoader.DataLoader(dt_test, batch_size=len(Tc))
@@ -113,9 +130,9 @@ def main():
 
     # training
     def train():
-        for epoch in range(200):
+        for epoch in range(40):
             myModel.train()
-            total_loss = 0.0
+            total_loss = []
             for i, (pretime, posttime, treat) in enumerate(trainset):
                 # (batch, pretime_len), (batch, posttime_len), (batch, 1)
                 pretime, posttime, treat = pretime.to(device), posttime.to(device), treat.to(device)
@@ -131,9 +148,10 @@ def main():
                 loss = criterion(pred0, pred1, posttime0, posttime1)
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item()
-            if epoch % 20 == 0:
-                print("epoch:", epoch, "loss:", total_loss)
+                total_loss.append(loss.detach().numpy())
+
+            if epoch % 2 == 0:
+                print("epoch:", epoch, "loss:", np.mean(total_loss))
 
     # testing
     def test():
@@ -163,7 +181,7 @@ def main():
 
 PARAM = {
     'Hidden': 4,
-    'batch_size': 16,
+    'batch_size': 64,
 }
 
 SEED = 100
