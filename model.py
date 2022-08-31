@@ -72,6 +72,16 @@ class Predictor(torch.nn.Module):
         pred = self.NN2(mid)
         return pred
 
+class PropensityNet(torch.nn.Module):
+    def __init__(self, hidden_dim):
+        super(PropensityNet, self).__init__()
+        self.NN = torch.nn.Linear(hidden_dim,1)
+
+    def forward(self, emb):
+        pred_pro = self.NN(emb)
+        return pred_pro
+
+
 class MyModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -79,20 +89,26 @@ class MyModel(torch.nn.Module):
         self.extractor = lstmExtractor(hidden_dim=PARAM['Hidden'])
         self.predictor0 = Predictor(hidden_dim=PARAM['Hidden'])
         self.predictor1 = Predictor(hidden_dim=PARAM['Hidden'])
+        self.propensitynet = PropensityNet(hidden_dim=PARAM['Hidden'])
 
     def forward(self, pretime, t0_idx, t1_idx):
         emb = self.extractor(pretime)   # (batch, hidden_dim)
         emb0 = emb[t0_idx]    # (batch[t==1], hidden_dim)
         emb1 = emb[t1_idx]    # (batch[t==0], hidden_dim)
         preds0, preds1 = self.predictor0(emb0), self.predictor1(emb1)   # preds: (batch[t==j], posttime_len)
-        return preds0, preds1
+        pred_pro0, pred_pro1 = self.propensitynet(emb0), self.propensitynet(emb1)
+        return preds0, preds1, pred_pro0, pred_pro1
 
-def criterion(pred0, pred1, posttime0, posttime1):
+def criterion(pred0, pred1, posttime0, posttime1, pred_pro0, pred_pro1):
     assert len(pred0)==len(posttime0), "lenght not match!"
     assert len(pred1) == len(posttime1), "lenght not match!"
     preds = torch.cat([pred0, pred1],dim=0)  # (batch, posttime_len)
     posttime = torch.cat([posttime0, posttime1],dim=0)  # (batch, posttime_len)
-    return F.mse_loss(preds, posttime)
+
+    t0 = torch.zeros(pred_pro0.shape)
+    t1 = torch.ones(pred_pro1.shape)
+
+    return F.mse_loss(preds, posttime) + PARAM['pro_reg'] * (F.mse_loss(pred_pro0, t0)+F.mse_loss(pred_pro1, t1))
 
 def timeplot(pred, fact):
     assert len(pred) == len(fact), "lenght not match!"
@@ -144,8 +160,8 @@ def main():
                 posttime0 = posttime[t0_idx]  # (batch[t==1], posttime_len)
                 posttime1 = posttime[t1_idx]  # (batch[t==0], posttime_len)
 
-                pred0, pred1 = myModel(pretime, t0_idx, t1_idx)
-                loss = criterion(pred0, pred1, posttime0, posttime1)
+                pred0, pred1, pred_pro0, pred_pro1 = myModel(pretime, t0_idx, t1_idx)
+                loss = criterion(pred0, pred1, posttime0, posttime1, pred_pro0, pred_pro1)
                 loss.backward()
                 optimizer.step()
                 total_loss.append(loss.detach().numpy())
@@ -168,8 +184,11 @@ def main():
                 counterposttime1 = counterposttime[t1_idx]  # (N[t==1], posttime_len)
 
                 # pred0: actually receive T=1, predict counter factual T=0
-                pred0, pred1 = myModel(pretime, t0_idx, t1_idx) # pred: # (N[t==j], posttime_len)
-                metric = criterion(pred0, pred1, counterposttime0, counterposttime1).detach().numpy()
+                pred0, pred1, _, _ = myModel(pretime, t0_idx, t1_idx) # pred: # (N[t==j], posttime_len)
+
+                preds = torch.cat([pred0, pred1], dim=0)  # (batch, posttime_len)
+                posttime = torch.cat([counterposttime0, counterposttime1], dim=0)  # (batch, posttime_len)
+                metric = F.mse_loss(preds, posttime).detach().numpy()
 
                 print("test mse:", metric)
 
@@ -182,6 +201,7 @@ def main():
 PARAM = {
     'Hidden': 4,
     'batch_size': 64,
+    'pro_reg': 0.05,
 }
 
 SEED = 100
