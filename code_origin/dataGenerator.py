@@ -15,7 +15,8 @@ def transitionFunc(pattern):
     else:
         return np.random.choice(3, 1, p=[0.05, 0.05, 0.9])
 
-def genTrajectory(pattern, weekday, traits):
+def genClickTrajectory(pattern, traits, weekday):
+    # traits: (N, )
     # base rate: (pattern, channel)
     mu_weekday = [[0.3, 0.25, 0.05, 0.1],
                [0.1, 0.05, 0.25, 0.35],
@@ -24,24 +25,42 @@ def genTrajectory(pattern, weekday, traits):
                [0.05, 0.02, 0.1, 0.2],
                [0.02, 0.15, 0.02, 0.05]]
     if weekday == True:
-        mu = mu_weekday[pattern]
+        mu = np.array(mu_weekday[pattern])    # array: (channel)
     else:
-        mu = mu_weekend[pattern]
+        mu = np.array(mu_weekend[pattern])    # array: (channel)
 
-    Lambda = 1 * mu + 1 * traits
+    Mu = np.tile(mu, (PARAM['N'],1))    # (N, channel)
+    Lambda = 1 * Mu + 1 * traits[:, np.newaxis] # (N, channel)
     return Lambda
 
+def genConverTrajectory(pattern, traits, click):
+    # traits: (N, u_dim); click: (N, channel)
+    # base rate: (pattern, channel)
+    phi = [[0.4, 0.25, 0.2, 0.15],
+            [0.15, 0.2, 0.3, 0.3],
+            [0.2, 0.25, 0.15, 0.2]]
+    # U->Y par: (pattern, u_dim)
+    betaU = [[0.1, 0.2, 0.3, 0.4],
+            [0.2, 0.3, 0.1, 0.4],
+            [0.3, 0.1, 0.4, 0.2]]
 
+    Phi = np.tile(np.array(phi[pattern]), (PARAM['N'],1))   # array: copy(channel) -> (N, channel)
+    BetaU = np.tile(np.array(betaU[pattern]), (PARAM['N'],1))   # array: copy(u_dim) -> (N, u_dim)
+    # The vector with dim=1 is multiplied by the corresponding position
+    Lambda1 = np.diag(np.dot(Phi, click.T)) + np.diag(np.dot(BetaU, traits.T))  # (N, )
+    return Lambda1
 
 def generateData():
-    u = np.random.uniform(0, 1, size=(PARAM['N'],4))
-    print(u.shape)
-    print(np.mean(u))
+    u = np.random.uniform(0, 1, size=(PARAM['N'],4))    # (N, u_dim)
+    ave_u = np.average(u,axis=1)    # (N, )
+    pattern = 1
+    Lambda = genClickTrajectory(pattern, ave_u, weekday=True)
+    click = np.random.poisson(Lambda)   # one day's click, (N, channel)
+    Lambda1 = genConverTrajectory(pattern, u, click)
+    conver = np.random.poisson(Lambda1)  # one day's conversion, (N, channel)
 
 
 def main():
-    # channel
-    c1, c2, c3, c4 = [], [], [], []
     generateData()
 
 
@@ -50,6 +69,7 @@ set_seed(SEED)
 
 PARAM = {
     'N': 100,
+    'T': 120,
 }
 
 if __name__ == "__main__":
