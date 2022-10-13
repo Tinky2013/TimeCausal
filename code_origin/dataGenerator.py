@@ -25,16 +25,15 @@ def genClickTrajectory(pattern, traits, weekday):
                [0.05, 0.02, 0.1, 0.2],
                [0.02, 0.15, 0.02, 0.05]]
     if weekday == True:
-        mu = np.array(mu_weekday[pattern])    # array: (channel)
+        mu = mu_weekday[pattern]    # array: (channel)
     else:
-        mu = np.array(mu_weekend[pattern])    # array: (channel)
+        mu = mu_weekend[pattern]    # array: (channel)
 
-    Mu = np.tile(mu, (1,1))    # (1, channel)
-    Lambda = 1 * Mu + 1 * traits[:, np.newaxis] # (1, channel)
+    Lambda = [i+j for i,j in zip(mu,[traits]*4)]
     return Lambda
 
 def genConverTrajectory(pattern, traits, click):
-    # traits: (1, u_dim); click: (1, channel)
+    # traits: (u_dim); click: (channel)
     # base rate: (pattern, channel)
     phi = [[0.4, 0.25, 0.2, 0.15],
             [0.15, 0.2, 0.3, 0.3],
@@ -44,30 +43,52 @@ def genConverTrajectory(pattern, traits, click):
             [0.04, 0.06, 0.02, 0.08],
             [0.06, 0.02, 0.08, 0.04]]
 
-    Phi = np.tile(np.array(phi[pattern]), (1,1))   # array: copy(channel) -> (1, channel)
-    BetaU = np.tile(np.array(betaU[pattern]), (1,1))   # array: copy(u_dim) -> (1, u_dim)
-    # The vector with dim=1 is multiplied by the corresponding position
-    Lambda1 = np.diag(np.dot(Phi, click.T)) + np.diag(np.dot(BetaU, traits.T))  # (1, )
+    Phi, BetaU = phi[pattern], betaU[pattern]
+    path1 = [i*j for i,j in zip(Phi, click)]
+    path2 = [i*j for i,j in zip(BetaU, traits)]
+    Lambda1 = np.sum(path1)+np.sum(path2)
     return Lambda1
 
 def generateData():
-    all_Click, all_Conver = [], []
+    all_Click, all_Conver, all_u, uid, all_pattern = [], [], [], [], []
+
     for i in range(PARAM['N']):
-        Click, Conver = np.array([[0,0,0,0]]), np.array([0])
+        #Click, Conver = np.array([[0,0,0,0]]), np.array([0])
+        Click, Conver, Pattern = [], [], []
         pattern = np.random.choice([0, 1, 2], p=[0.35, 0.33, 0.32])
-        u = np.random.uniform(0, 1, size=(1, 4))  # (1, u_dim)
-        ave_u = np.average(u, axis=1)  # (1, )
+        u = np.random.uniform(0, 1, size=4)
+        ave_u = np.average(u)
+
         for t in range(PARAM['T']):
             Lambda = genClickTrajectory(pattern, ave_u, weekday=True)
-            click = np.random.poisson(Lambda)   # one day's click, (1, channel)
+            click = np.random.poisson(Lambda)   # one day's click, (channel)
             Lambda1 = genConverTrajectory(pattern, u, click)
-            conver = np.random.poisson(Lambda1)  # one day's conversion, (1, channel)
+            conver = np.random.poisson(Lambda1)  # one day's conversion, (1)
+            Pattern.append(pattern)
+            # pattern shift
             pattern = transitionFunc(pattern)
+            Click.append(click)
+            Conver.append(conver)
+        # Click: list(T, channel), Conver: list(T, 1)
+        all_u.append(u)
+        all_Click.append(Click)
+        all_Conver.append(Conver)
+        all_pattern.append(Pattern)
+        uid.append([i]*PARAM['T'])
 
-            Click = np.concatenate((Click, click), axis=0)
-            Conver = np.concatenate((Conver, conver), axis=0)
-        # for an individual, Click: (T+1, channel); Conver: (T+1,)
-        all_Click.append(Click), all_Conver.append(Conver)
+    all_Click = np.array(all_Click).reshape(-1, 4)   # (N, T, channel) -> (N*T, channel)
+    all_Conver = np.array(all_Conver).reshape(-1, 1)    # (N, T, 1) -> (N*T, 1)
+    all_pattern = np.array(all_pattern).reshape(-1, 1)
+    all_u, all_uid = np.array(all_u), np.array([i for i in range(PARAM['N'])])[:,np.newaxis] # ndarray(N, u_dim), (N, 1)
+
+    time = np.array([i for i in range(PARAM['T'])] * PARAM['N'])[:,np.newaxis]
+    uid = np.array(uid).reshape(-1,1)
+    temporal_dt = np.concatenate((uid, time, all_Click, all_Conver, all_pattern), axis=-1)  # (N*T, 1+1+channel+conver+1)
+    temporal_dt = pd.DataFrame(temporal_dt, columns=['uid', 'time', 'chan0', 'chan1', 'chan2', 'chan3', 'conver', 'pattern'])
+    ux_dt = np.concatenate((all_uid, all_u), axis=-1)   # (N, 1+u_dim)
+    ux_dt = pd.DataFrame(ux_dt, columns=['uid', 'u0', 'u1', 'u2', 'u3'])
+    temporal_dt.to_csv('trajectory.csv', index=False)
+    ux_dt.to_csv('ufeature.csv', index=False)
 
 def main():
     generateData()
