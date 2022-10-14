@@ -6,6 +6,8 @@ import math
 import os
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 def set_seed(seed):
     random.seed(seed)
@@ -13,6 +15,35 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+class MyDataset(Dataset):
+    def __init__(self):
+        self.x = torch.linspace(11, 20, 10)
+        self.y = torch.linspace(1, 10, 10)
+        self.len = len(self.x)
+
+        self._feature = None
+        self._label = None
+        self._index = None
+
+        self.seq_len = 48
+        self.horizon = 0
+        self.num_states = 3
+        self.batch_size = 20
+        self.shuffle = True
+
+        # add memory to feature -> self._data: (N, channel + num_pattern)
+        self._data = np.c_[self.feature, np.zeros((len(self._feature), self.num_states), dtype=np.float32)]
+        # padding tensor -> self.zeros: (seq_len, channel + num_pattern)
+        self.zeros = np.zeros((self.seq_len, self._data.shape[1]), dtype=np.float32)
+        # create batch slices
+        self.batch_slices = _create_ts_slices(self._index, self.seq_len)
+
+    def __getitem__(self, index):
+        return self._feature[index], self._label[index]
+
+    def __len__(self):
+        return len(self._feature)
 
 class Extractor(torch.nn.Module):
     def __init__(self, hidden_dim):
@@ -55,12 +86,22 @@ class Predictor(torch.nn.Module):
         return F.mse_loss(y1_pred, y1) + F.mse_loss(y0_pred, y0)
 
 class Tra(torch.nn.Module):
-    def __init__(self, in_dim):
+    def __init__(self, input_size, num_states=3, hidden_size=8,):
         super().__init__()
-        self.num_state = 3
-        self.extractor = Extractor(hidden_dim=H_dim)
-        self.fc = torch.nn.Linear(in_dim, self.num_state)
-        self.predictors = Predictor(hidden_dim=H_dim)
+        self.num_state = num_states
+
+        self.router = torch.nn.LSTM(
+            input_size = self.num_state,
+            hidden_size = hidden_size,
+            num_layers = 1,
+            batch_first = True,
+        )
+        self.fc = torch.nn.Linear(hidden_size + input_size, num_states)
+        self.predictors = torch.nn.Linear(input_size, num_states)
+
+        # self.extractor = Extractor(hidden_dim=H_dim)
+        # self.fc = torch.nn.Linear(in_dim, self.num_state)
+        # self.predictors = Predictor(hidden_dim=H_dim)
 
     def forward(self, f1, f0, Train=True):
         pass
@@ -107,75 +148,82 @@ def sinkhorn(Q, n_iters=3, epsilon=0.01):
             Q /= Q.sum(dim=1, keepdim=True)
     return Q
 
+
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     static = pd.read_csv('ufeature.csv')
     dynamic = pd.read_csv('trajectory.csv')
 
-    tra = Tra(in_dim=H_dim).to(device)
+    tra = Tra().to(device)
     optimizer = torch.optim.Adam(tra.parameters(), lr=0.01)
-    #
-    #
-    # def train():
-    #     tra.train()
-    #     optimizer.zero_grad()
-    #     # y1_pred, y0_pred = model(f1, f0)
-    #
-    #     pred1, pred0, all_preds1, all_preds0, prob = tra(f1, f0, Train=True)
-    #     # size: (252), (248), (252,3), (248,3), (252+248,3)
-    #     loss = F.mse_loss(pred1, y1.squeeze(-1)) + F.mse_loss(pred0, y0.squeeze(-1))
-    #     y1_all, y0_all = y1.repeat(1,3), y0.repeat(1,3)
-    #
-    #     L = torch.cat([torch.pow((all_preds1.detach() - y1_all), 2), torch.pow((all_preds0.detach() - y0_all), 2)], dim=0)
-    #     L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
-    #
-    #     if prob is not None:
-    #         P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
-    #         # print("loss:", L[0])
-    #         # print("p:", P[0])
-    #         reg = prob.log().mul(P).sum(dim=-1).mean()
-    #         loss = loss - lamb * reg * (rho ** (epoch+1))
-    #
-    #
-    #     loss.backward()
-    #     optimizer.step()
-    #     #print("train loss:", loss.item())
-    #
-    # def test():
-    #     print("testing the model")
-    #     tra.eval()
-    #     with torch.no_grad():
-    #         pred1, pred0, all_preds1, all_preds0, prob = tra(fc1, fc0, Train=False)
-    #
-    #     yc1_all, yc0_all = yc1.repeat(1, 3), yc0.repeat(1, 3)
-    #     L = torch.cat([torch.pow((all_preds1.detach() - yc1_all), 2), torch.pow((all_preds0.detach() - yc0_all), 2)],
-    #                   dim=0)
-    #     L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
-    #     loss = F.mse_loss(pred1, yc1.squeeze(-1))+F.mse_loss(pred0, yc0.squeeze(-1))
-    #
-    #     print("test loss:", loss.detach().numpy())
-    #
-    #     yc1s = yc1.reshape(1,-1)[0]
-    #     yc0s = yc0.reshape(1, -1)[0]
-    #     true = torch.cat([yc1s,yc0s],dim=0)
-    #
-    #     pred = torch.cat([pred1,pred0],dim=0)
-    #     result = pd.DataFrame({
-    #         'true': np.array(true),
-    #         'pred': np.array(pred),
-    #     })
-    #     result.to_csv(('result.csv'),index=False)
-    #
-    # lamb = 0.5
-    # rho = 0.99
-    # for epoch in range(1000):
-    #     train()
-    #     if epoch%100==0:
-    #         test()
 
-H_dim = 2
+    def train_epoch(train_data):
+        count = 0
+        total_loss = 0
+        total_count = 0
+
+        tra.train()
+        for batch in tqdm(train_data, total=PARAM['max_step_per_epoch']):
+            # data: (batch, N, channel + num_pattern)
+            data, label, index = None, None, None    # click, conver, <uid, time>
+            feature = data[:, :, : -3]  # (batch, N, channel)
+            hist_loss = data[:, : -horizon, -3:]    # (batch, N-horizon, channel)
+
+            hidden = model(feature)
+            pred, all_preds, prob = tra(hidden, hist_loss)
+
+            loss = (pred - label).pow(2).mean()
+
+            L = (all_preds.detach() - label[:, None]).pow(2)
+            L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+
+            assign_data(index, L)
+
+            if prob is not None:
+                P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
+                lamb = lamb * (rho ** global_step)
+                reg = prob.log().mul(P).sum(dim=-1).mean()
+                loss = loss - lamb * reg
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            total_loss += loss.item()
+            total_count += len(pred)
+
+        total_loss /= total_count
+
+        return total_loss
+
+        pass
+
+    def test_epoch(data):
+        pass
+
+    # prepare the data
+    train_set, valid_set, test_set = None, None, None
+    # initialize the memory
+    test_epoch(train_set)
+
+    for epoch in range(PARAM['n_epoch']):
+        train_epoch(train_set)
+        # during evaluating, the whole memory will be refreshed
+        train_set.clear_memory()
+        train_metrics = test_epoch(train_set)
+        valid_metrics = test_epoch(valid_set)
+
+    metrics, preds = test_epoch(test_set)
+
 SEED = 100
 set_seed(SEED)
+
+PARAM = {
+    'n_epoch': 100,
+    'max_step_per_epoch': 20,
+}
 
 if __name__ == "__main__":
     main()
