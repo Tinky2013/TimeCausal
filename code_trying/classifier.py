@@ -114,84 +114,85 @@ def sinkhorn(Q, n_iters=3, epsilon=0.01):
     return Q
 
 def main():
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dt = pd.read_csv('data.csv')
-    dt1 = dt[dt['t']==1]
-    dt0 = dt[dt['t']==0]
-    f1 = torch.tensor(np.array(dt1[['z1','z2','z3']]), dtype=torch.float).to(device)
-    f0 = torch.tensor(np.array(dt0[['z1', 'z2', 'z3']]), dtype=torch.float).to(device)
-    y1 = torch.tensor(np.array(dt1[['y']]), dtype=torch.float).to(device)
-    y0 = torch.tensor(np.array(dt0[['y']]), dtype=torch.float).to(device)
+    static = pd.read_csv('ufeature.csv')
+    dynamic = pd.read_csv('trajectory.csv')
 
-
-    dtc1 = dt[dt['cont']==1]
-    dtc0 = dt[dt['cont']==0]
-    fc1 = torch.tensor(np.array(dtc1[['z1','z2','z3']]), dtype=torch.float).to(device)
-    fc0 = torch.tensor(np.array(dtc0[['z1','z2','z3']]), dtype=torch.float).to(device)
-    yc1 = torch.tensor(np.array(dtc1[['cony']]), dtype=torch.float).to(device)
-    yc0 = torch.tensor(np.array(dtc0[['cony']]), dtype=torch.float).to(device)
-
+    # dt1 = dt[dt['t']==1]
+    # dt0 = dt[dt['t']==0]
+    # f1 = torch.tensor(np.array(dt1[['z1','z2','z3']]), dtype=torch.float).to(device)
+    # f0 = torch.tensor(np.array(dt0[['z1', 'z2', 'z3']]), dtype=torch.float).to(device)
+    # y1 = torch.tensor(np.array(dt1[['y']]), dtype=torch.float).to(device)
+    # y0 = torch.tensor(np.array(dt0[['y']]), dtype=torch.float).to(device)
+    #
+    #
+    # dtc1 = dt[dt['cont']==1]
+    # dtc0 = dt[dt['cont']==0]
+    # fc1 = torch.tensor(np.array(dtc1[['z1','z2','z3']]), dtype=torch.float).to(device)
+    # fc0 = torch.tensor(np.array(dtc0[['z1','z2','z3']]), dtype=torch.float).to(device)
+    # yc1 = torch.tensor(np.array(dtc1[['cony']]), dtype=torch.float).to(device)
+    # yc0 = torch.tensor(np.array(dtc0[['cony']]), dtype=torch.float).to(device)
+    #
     tra = Tra(in_dim=H_dim).to(device)
     optimizer = torch.optim.Adam(tra.parameters(), lr=0.01)
-
-
-    def train():
-        tra.train()
-        optimizer.zero_grad()
-        # y1_pred, y0_pred = model(f1, f0)
-
-        pred1, pred0, all_preds1, all_preds0, prob = tra(f1, f0, Train=True)
-        # size: (252), (248), (252,3), (248,3), (252+248,3)
-        loss = F.mse_loss(pred1, y1.squeeze(-1)) + F.mse_loss(pred0, y0.squeeze(-1))
-        y1_all, y0_all = y1.repeat(1,3), y0.repeat(1,3)
-
-        L = torch.cat([torch.pow((all_preds1.detach() - y1_all), 2), torch.pow((all_preds0.detach() - y0_all), 2)], dim=0)
-        L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
-
-        if prob is not None:
-            P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
-            # print("loss:", L[0])
-            # print("p:", P[0])
-            reg = prob.log().mul(P).sum(dim=-1).mean()
-            loss = loss - lamb * reg * (rho ** (epoch+1))
-
-
-        loss.backward()
-        optimizer.step()
-        #print("train loss:", loss.item())
-
-    def test():
-        print("testing the model")
-        tra.eval()
-        with torch.no_grad():
-            pred1, pred0, all_preds1, all_preds0, prob = tra(fc1, fc0, Train=False)
-
-        yc1_all, yc0_all = yc1.repeat(1, 3), yc0.repeat(1, 3)
-        L = torch.cat([torch.pow((all_preds1.detach() - yc1_all), 2), torch.pow((all_preds0.detach() - yc0_all), 2)],
-                      dim=0)
-        L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
-        loss = F.mse_loss(pred1, yc1.squeeze(-1))+F.mse_loss(pred0, yc0.squeeze(-1))
-
-        print("test loss:", loss.detach().numpy())
-
-        yc1s = yc1.reshape(1,-1)[0]
-        yc0s = yc0.reshape(1, -1)[0]
-        true = torch.cat([yc1s,yc0s],dim=0)
-
-        pred = torch.cat([pred1,pred0],dim=0)
-        result = pd.DataFrame({
-            'true': np.array(true),
-            'pred': np.array(pred),
-        })
-        result.to_csv(('result.csv'),index=False)
-
-    lamb = 0.5
-    rho = 0.99
-    for epoch in range(1000):
-        train()
-        if epoch%100==0:
-            test()
+    #
+    #
+    # def train():
+    #     tra.train()
+    #     optimizer.zero_grad()
+    #     # y1_pred, y0_pred = model(f1, f0)
+    #
+    #     pred1, pred0, all_preds1, all_preds0, prob = tra(f1, f0, Train=True)
+    #     # size: (252), (248), (252,3), (248,3), (252+248,3)
+    #     loss = F.mse_loss(pred1, y1.squeeze(-1)) + F.mse_loss(pred0, y0.squeeze(-1))
+    #     y1_all, y0_all = y1.repeat(1,3), y0.repeat(1,3)
+    #
+    #     L = torch.cat([torch.pow((all_preds1.detach() - y1_all), 2), torch.pow((all_preds0.detach() - y0_all), 2)], dim=0)
+    #     L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+    #
+    #     if prob is not None:
+    #         P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
+    #         # print("loss:", L[0])
+    #         # print("p:", P[0])
+    #         reg = prob.log().mul(P).sum(dim=-1).mean()
+    #         loss = loss - lamb * reg * (rho ** (epoch+1))
+    #
+    #
+    #     loss.backward()
+    #     optimizer.step()
+    #     #print("train loss:", loss.item())
+    #
+    # def test():
+    #     print("testing the model")
+    #     tra.eval()
+    #     with torch.no_grad():
+    #         pred1, pred0, all_preds1, all_preds0, prob = tra(fc1, fc0, Train=False)
+    #
+    #     yc1_all, yc0_all = yc1.repeat(1, 3), yc0.repeat(1, 3)
+    #     L = torch.cat([torch.pow((all_preds1.detach() - yc1_all), 2), torch.pow((all_preds0.detach() - yc0_all), 2)],
+    #                   dim=0)
+    #     L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+    #     loss = F.mse_loss(pred1, yc1.squeeze(-1))+F.mse_loss(pred0, yc0.squeeze(-1))
+    #
+    #     print("test loss:", loss.detach().numpy())
+    #
+    #     yc1s = yc1.reshape(1,-1)[0]
+    #     yc0s = yc0.reshape(1, -1)[0]
+    #     true = torch.cat([yc1s,yc0s],dim=0)
+    #
+    #     pred = torch.cat([pred1,pred0],dim=0)
+    #     result = pd.DataFrame({
+    #         'true': np.array(true),
+    #         'pred': np.array(pred),
+    #     })
+    #     result.to_csv(('result.csv'),index=False)
+    #
+    # lamb = 0.5
+    # rho = 0.99
+    # for epoch in range(1000):
+    #     train()
+    #     if epoch%100==0:
+    #         test()
 
 H_dim = 2
 SEED = 100
