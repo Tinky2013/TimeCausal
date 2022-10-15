@@ -116,7 +116,7 @@ class MTSDatasetH(DatasetH):
         df = self.handler._data
         df.index = df.index.swaplevel()
         df.sort_index(inplace=True)
-
+        # list
         self._data = df["feature"].values.astype("float32")
         self._label = df["label"].squeeze().astype("float32")
         self._index = df.index
