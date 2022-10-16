@@ -17,11 +17,14 @@ def main():
     label = dynamic[['conver']].values.astype("float32")
 
     HData = MyDataset(feature=feature, label=label, index=index)
+    data_loader = DataLoader(HData, batch_size=10)
 
+    # max_step = 50
+    # for batch in tqdm(HData, total=max_step):
+    #     print(batch)
 
-    max_step = 50
-    for batch in tqdm(HData, total=max_step):
-        print(batch)
+    for batch_idx, data in enumerate(data_loader):
+        print(batch_idx, data)
 
 
 PARAM = {

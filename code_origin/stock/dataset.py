@@ -193,7 +193,6 @@ class MTSDatasetH(DatasetH):
         self.batch_size = -1
         self.drop_last = False
         self.shuffle = False
-
     def _get_slices(self):
         if self.batch_size < 0:
             slices = self.daily_slices.copy()
@@ -202,6 +201,7 @@ class MTSDatasetH(DatasetH):
             slices = self.batch_slices.copy()
             batch_size = self.batch_size
         return slices, batch_size
+
 
     def __len__(self):
         slices, batch_size = self._get_slices()

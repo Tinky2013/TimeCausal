@@ -38,11 +38,13 @@ def _create_ts_slices(index, seq_len):
     # features btw [start, stop) are used to predict the `stop - 1` label
     slices = []
     for cur_loc, cur_cnt in zip(start_index_of_codes, sample_count_by_codes):
-        for stop in range(1, cur_cnt + 1):
+        for stop in range(1 + 48, cur_cnt + 1):
             end = cur_loc + stop
             start = max(end - seq_len, 0)
             slices.append(slice(start, end))
+
     slices = np.array(slices)
+
     return slices
 
 class MyDataset(Dataset):
@@ -55,7 +57,7 @@ class MyDataset(Dataset):
         self.horizon = 0
         self.num_states = 3
         self.batch_size = 20
-        self.shuffle = True
+        self.shuffle = False
 
         # add memory to feature -> self._data: (N, channel + num_pattern)
         self._data = np.c_[self._feature, np.zeros((len(self._feature), self.num_states), dtype=np.float32)]
@@ -63,12 +65,51 @@ class MyDataset(Dataset):
         self.zeros = np.zeros((self.seq_len, self._data.shape[1]), dtype=np.float32)
         # create batch slices
         self.batch_slices = _create_ts_slices(self._index, self.seq_len)
+        self.slices = self.batch_slices.copy()
+
+        self.data, self.label, self.index = [], [], []
+        for slc in self.slices:
+            _data = self._data[slc].copy()
+            if self.num_states > 0:
+                _data[-self.horizon:, -self.num_states:] = 0
+            self.data.append(_data)
+            self.label.append(self._label[slc.stop - 1])
+            self.index.append(slc.stop - 1)
+
+        self.index = torch.tensor(self.index, device=device)
+        self.data = torch.tensor(self.data, device=device)
+        self.label = torch.tensor(self.label, device=device)
+
+    # def _get_slices(self):
+    #     slices = self.batch_slices.copy()
+    #     batch_size = self.batch_size
+    #     return slices, batch_size
 
     def __getitem__(self, id):
-        return self._feature[id], self._label[id], self._index[id]
+        # slices, batch_size = self._get_slices()
+        # if self.shuffle:
+        #     np.random.shuffle(slices)
+        #
+        # data, label, index = [], [], []
+        # for slc in slices:
+        #     _data = self._data[slc].copy()
+        #     if self.num_states > 0:
+        #         _data[-self.horizon:, -self.num_states:] = 0
+        #     data.append(_data)
+        #     label.append(self._label[slc.stop - 1])
+        #     index.append(slc.stop - 1)
+        #
+        # # concate
+        # index = torch.tensor(index, device=device)
+        # data = torch.tensor(data, device=device)
+        # label = torch.tensor(label, device=device)
+        ## TODO: update memory
+        return self.index[id], self.data[id], self.label[id]
 
     def __len__(self):
-        return len(self._feature)
+        # slices, batch_size = self._get_slices()
+        # return (len(slices) + batch_size - 1) // batch_size
+        return len(self.data)
 
     def assign_data(self, index, vals):
         vals = vals.detach().cpu().numpy()
@@ -189,55 +230,54 @@ class TRAModel(object):
         self.optimizer = torch.optim.Adam(self.tra.parameters(), lr=0.01)
         self.global_step = -1
 
-def train_epoch(train_data):
-    traModel = TRAModel()
-    traModel.tra.train()
-    count = 0
-    total_loss = 0
-    total_count = 0
-    max_step = PARAM['max_step_per_epoch']
+    def train_epoch(self, train_data):
+        self.tra.train()
+        count = 0
+        total_loss = 0
+        total_count = 0
+        max_step = PARAM['max_step_per_epoch']
 
-    for batch in tqdm(train_data, total=max_step):
-        count += 1
-        if count > max_step:
-            break
-        traModel.global_step += 1
+        for batch in tqdm(train_data, total=max_step):
+            count += 1
+            if count > max_step:
+                break
+            self.global_step += 1
 
-        # data: (batch, N, channel + num_pattern)
-        data, label, index = None, None, None    # click, conver, <uid, time>
-        feature = data[:, :, : -3]  # (batch, N, channel)
-        hist_loss = data[:, : -horizon, -3:]    # (batch, N-horizon, channel)
+            # data: (batch, N, channel + num_pattern)
+            data, label, index = None, None, None    # click, conver, <uid, time>
+            feature = data[:, :, : -3]  # (batch, N, channel)
+            hist_loss = data[:, : -horizon, -3:]    # (batch, N-horizon, channel)
 
-        hidden = model(feature)
-        pred, all_preds, prob = tra(hidden, hist_loss)
+            hidden = model(feature)
+            pred, all_preds, prob = tra(hidden, hist_loss)
 
-        loss = (pred - label).pow(2).mean()
+            loss = (pred - label).pow(2).mean()
 
-        L = (all_preds.detach() - label[:, None]).pow(2)
-        L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+            L = (all_preds.detach() - label[:, None]).pow(2)
+            L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
 
-        assign_data(index, L)
+            assign_data(index, L)
 
-        if prob is not None:
-            P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
-            lamb = lamb * (rho ** global_step)
-            reg = prob.log().mul(P).sum(dim=-1).mean()
-            loss = loss - lamb * reg
+            if prob is not None:
+                P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
+                lamb = lamb * (rho ** self.global_step)
+                reg = prob.log().mul(P).sum(dim=-1).mean()
+                loss = loss - lamb * reg
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
-        total_loss += loss.item()
-        total_count += len(pred)
+            total_loss += loss.item()
+            total_count += len(pred)
 
-    total_loss /= total_count
+        total_loss /= total_count
 
-    return total_loss
+        return total_loss
 
 
-def test_epoch(data):
-    pass
+    def test_epoch(self, data):
+        pass
 
 def main():
 
@@ -250,23 +290,24 @@ def main():
     label = dynamic[['conver']].values.astype("float32")
 
     HData = MyDataset(feature=feature, label=label, index=index)
+    traModel = TRAModel()
 
     # prepare the data
     train_set, valid_set, test_set = None, None, None
     # train
-    global_step = -1
+    traModel.global_step = -1
     if PARAM['pattern']>1:
-        test_epoch(train_set)   # initialize the memory
+        traModel.test_epoch(HData)   # initialize the memory
 
     for epoch in range(PARAM['n_epoch']):
         print("Training Epoch: ", epoch)
-        train_epoch(train_set)
+        traModel.train_epoch(HData)
         # during evaluating, the whole memory will be refreshed
         train_set.clear_memory()
-        train_metrics = test_epoch(train_set)
-        valid_metrics = test_epoch(valid_set)
+        train_metrics = traModel.test_epoch(train_set)
+        valid_metrics = traModel.test_epoch(valid_set)
 
-    metrics, preds = test_epoch(test_set)
+    metrics, preds = traModel.test_epoch(test_set)
 
 SEED = 100
 set_seed(SEED)
