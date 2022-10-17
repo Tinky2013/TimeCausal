@@ -99,7 +99,7 @@ set_seed(SEED)
 
 PARAM = {
     'N': 100,
-    'T': 120,
+    'T': 500,
 }
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ def main():
 
     for batch_idx, data in enumerate(data_loader):
         print(batch_idx, data)
+        print(c)
 
 
 PARAM = {

@@ -18,6 +18,13 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+def _set_data(data):
+    data = data.set_index('time', append=True)
+    index = data.index
+    feature = data[['chan0','chan1','chan2','chan3']].values.astype("float32")
+    label = data[['conver']].values.astype("float32")
+    return index, feature, label
+
 def _create_ts_slices(index, seq_len):
     """
     create time series slices from pandas index
@@ -38,163 +45,33 @@ def _create_ts_slices(index, seq_len):
     # features btw [start, stop) are used to predict the `stop - 1` label
     slices = []
     for cur_loc, cur_cnt in zip(start_index_of_codes, sample_count_by_codes):
-        for stop in range(1 + 48, cur_cnt + 1):
+        for stop in range(seq_len, cur_cnt + 1):
             end = cur_loc + stop
             start = max(end - seq_len, 0)
             slices.append(slice(start, end))
 
     slices = np.array(slices)
-
     return slices
 
-class MyDataset(Dataset):
-    def __init__(self, feature, label, index):
-        self._feature = feature
-        self._label = label
-        self._index = index
+def evaluate(pred):
+    '''
 
-        self.seq_len = 48
-        self.horizon = 0
-        self.num_states = 3
-        self.batch_size = 20
-        self.shuffle = False
+    Args:
+        pred: DataFrame for prediction
 
-        # add memory to feature -> self._data: (N, channel + num_pattern)
-        self._data = np.c_[self._feature, np.zeros((len(self._feature), self.num_states), dtype=np.float32)]
-        # padding tensor -> self.zeros: (seq_len, channel + num_pattern)
-        self.zeros = np.zeros((self.seq_len, self._data.shape[1]), dtype=np.float32)
-        # create batch slices
-        self.batch_slices = _create_ts_slices(self._index, self.seq_len)
-        self.slices = self.batch_slices.copy()
+    Returns:
 
-        self.data, self.label, self.index = [], [], []
-        for slc in self.slices:
-            _data = self._data[slc].copy()
-            if self.num_states > 0:
-                _data[-self.horizon:, -self.num_states:] = 0
-            self.data.append(_data)
-            self.label.append(self._label[slc.stop - 1])
-            self.index.append(slc.stop - 1)
-
-        self.index = torch.tensor(self.index, device=device)
-        self.data = torch.tensor(self.data, device=device)
-        self.label = torch.tensor(self.label, device=device)
-
-    # def _get_slices(self):
-    #     slices = self.batch_slices.copy()
-    #     batch_size = self.batch_size
-    #     return slices, batch_size
-
-    def __getitem__(self, id):
-        # slices, batch_size = self._get_slices()
-        # if self.shuffle:
-        #     np.random.shuffle(slices)
-        #
-        # data, label, index = [], [], []
-        # for slc in slices:
-        #     _data = self._data[slc].copy()
-        #     if self.num_states > 0:
-        #         _data[-self.horizon:, -self.num_states:] = 0
-        #     data.append(_data)
-        #     label.append(self._label[slc.stop - 1])
-        #     index.append(slc.stop - 1)
-        #
-        # # concate
-        # index = torch.tensor(index, device=device)
-        # data = torch.tensor(data, device=device)
-        # label = torch.tensor(label, device=device)
-        ## TODO: update memory
-        return self.index[id], self.data[id], self.label[id]
-
-    def __len__(self):
-        # slices, batch_size = self._get_slices()
-        # return (len(slices) + batch_size - 1) // batch_size
-        return len(self.data)
-
-    def assign_data(self, index, vals):
-        vals = vals.detach().cpu().numpy()
-        index = index.detach().cpu().numpy()
-        self._data[index, -self.num_states :] = vals
-
-    def clear_memory(self):
-        self._data[:, -self.num_states :] = 0
-
-
-
-class Extractor(torch.nn.Module):
-    def __init__(self, hidden_dim):
-        super(Extractor, self).__init__()
-        # self.NN = torch.nn.Sequential(
-        #     torch.nn.Linear(3, hidden_dim),
-        #     torch.nn.ReLU(),
-        #     torch.nn.Linear(hidden_dim, H_dim)
-        # )
-        self.NN = torch.nn.Linear(3, hidden_dim)
-
-    def forward(self, f1, f0):
-        emb1 = self.NN(f1)
-        emb0 = self.NN(f0)
-        return emb1, emb0
-
-
-class Predictor(torch.nn.Module):
-    def __init__(self, hidden_dim):
-        super(Predictor, self).__init__()
-        # self.NN0 = torch.nn.Sequential(
-        #     torch.nn.Linear(hidden_dim, H_dim),
-        #     torch.nn.ReLU(),
-        #     torch.nn.Linear(H_dim, 3)
-        # )
-        # self.NN1 = torch.nn.Sequential(
-        #     torch.nn.Linear(hidden_dim, H_dim),
-        #     torch.nn.ReLU(),
-        #     torch.nn.Linear(H_dim, 3)
-        # )
-        self.NN0 = torch.nn.Linear(H_dim, 3)
-        self.NN1 = torch.nn.Linear(H_dim, 3)
-
-    def forward(self, emb1, emb0):
-        pred_y1 = self.NN1(emb1)
-        pred_y0 = self.NN0(emb0)
-        return pred_y1, pred_y0
-
-    def loss(self, y1_pred, y0_pred, y1, y0):
-        return F.mse_loss(y1_pred, y1) + F.mse_loss(y0_pred, y0)
-
-class Tra(torch.nn.Module):
-    def __init__(self, input_size, num_states=3, hidden_size=8,):
-        super().__init__()
-        self.num_state = num_states
-
-        self.router = torch.nn.LSTM(
-            input_size = self.num_state,
-            hidden_size = hidden_size,
-            num_layers = 1,
-            batch_first = True,
-        )
-        self.fc = torch.nn.Linear(hidden_size + input_size, num_states)
-        self.predictors = torch.nn.Linear(input_size, num_states)
-
-        # self.extractor = Extractor(hidden_dim=H_dim)
-        # self.fc = torch.nn.Linear(in_dim, self.num_state)
-        # self.predictors = Predictor(hidden_dim=H_dim)
-
-    def forward(self, f1, f0, Train=True):
-        pass
-        # emb1, emb0 = self.extractor(f1, f0)
-        # preds1, preds0 = self.predictors(emb1, emb0)
-        # input = torch.cat([emb1, emb0], dim=0)
-        # out = self.fc(input)
-        # prob = F.gumbel_softmax(out, dim=-1, tau=1, hard=False)
-        #
-        # if Train:
-        #     final_pred1 = (preds1 * prob[:len(emb1),:]).sum(dim=-1)
-        #     final_pred0 = (preds0 * prob[len(emb1):, :]).sum(dim=-1)
-        # else:
-        #     final_pred1 = preds1[range(len(preds1)), prob[:len(emb1),:].argmax(dim=-1)]
-        #     final_pred0 = preds0[range(len(preds0)), prob[len(emb1):, :].argmax(dim=-1)]
-        #
-        # return final_pred1, final_pred0, preds1, preds0, prob
+    '''
+    pred = pred.rank(pct=True)  # transform into percentiles
+    # get the 'score', 'label' column
+    score = pred.score
+    label = pred.label
+    # calculate the metrics
+    diff = score - label
+    MSE = (diff**2).mean()
+    MAE = (diff.abs()).mean()
+    IC = score.corr(label)  # calculate the correlation between two columns ('score' and 'label')
+    return {"MSE": MSE, "MAE": MAE, "IC": IC}
 
 def shoot_infs(inp_tensor):
     """Replaces inf by maximum of tensor"""
@@ -224,43 +101,147 @@ def sinkhorn(Q, n_iters=3, epsilon=0.01):
             Q /= Q.sum(dim=1, keepdim=True)
     return Q
 
+
+class MyDataset(Dataset):
+    def __init__(self, data):
+        self._index, self._feature, self._label = _set_data(data)
+
+        self.seq_len = 48
+        self.horizon = 0
+        self.num_states = 3
+        #self.batch_size = 20
+        self.shuffle = False
+
+        # add memory to feature -> self._data: (N, channel + num_pattern)
+        #self._data = np.c_[self._feature, np.zeros((len(self._feature), self.num_states), dtype=np.float32)]
+        # padding tensor -> self.zeros: (seq_len, channel + num_pattern)
+        #self.zeros = np.zeros((self.seq_len, self._data.shape[1]), dtype=np.float32)
+        # create batch slices
+        self.batch_slices = _create_ts_slices(self._index, self.seq_len)
+        self.slices = self.batch_slices.copy()
+
+        self.data, self.label, self.index = [], [], []
+        for slc in self.slices:
+            self.data.append(self._feature[slc].copy())
+            self.label.append(self._label[slc.stop - 1])
+            self.index.append(slc.stop - 1)
+
+        self.index = torch.tensor(self.index, device=device)
+        self.data = torch.tensor(self.data, device=device)
+        self.label = torch.tensor(self.label, device=device)
+
+
+    def __getitem__(self, id):
+        ## TODO: update memory
+        return self.index[id], self.data[id], self.label[id]
+
+    def __len__(self):
+        return len(self.data)
+
+    def assign_data(self, index, vals):
+        vals = vals.detach().cpu().numpy()
+        index = index.detach().cpu().numpy()
+        self._data[index, -self.num_states :] = vals
+
+    def clear_memory(self):
+        self._data[:, -self.num_states :] = 0
+
+
+class LSTMHA(torch.nn.Module):
+    def __init__(self, lstm_input_size=4, lstm_h_dim=16,
+                 lstm_num_layers=1, dropout=0.2):
+        """
+        Receive: batch_size, seq_len, input_size
+        """
+        super().__init__()
+        self.lstm = torch.nn.LSTM(input_size=lstm_input_size,
+                            hidden_size=lstm_h_dim,
+                            num_layers=lstm_num_layers,
+                            batch_first=True,
+                            bidirectional=False,
+                            dropout=dropout)
+
+    def forward(self, x):
+        outputs, _ = self.lstm(x)   # outputs: (batch, seq_len, hidden_size)
+        #outputs = outputs.transpose(1,2)  # (batch*stock_num, hidden_size, window_size_K)
+        return outputs
+
+class Tra(torch.nn.Module):
+    def __init__(self, input_size=16, num_states=3, hidden_size=8,):
+        super().__init__()
+        self.num_state = num_states
+
+        self.router = torch.nn.LSTM(
+            input_size = self.num_state,
+            hidden_size = hidden_size,
+            num_layers = 1,
+            batch_first = True,
+        )
+        self.fc = torch.nn.Linear(hidden_size + input_size, num_states)
+        self.predictors = torch.nn.Linear(input_size, num_states)
+
+
+    def forward(self, hidden):
+        # input: (batch, seq_len, hidden_size)
+        preds = self.predictors(hidden) # input: (batch, seq_len, hidden_size)
+
+        if self.num_state == 1:
+            return preds.squeeze(-1), preds, None
+
+        # information type
+        #router_out, _ = self.router(hist_loss)
+        #latent_representation = hidden
+        #out = self.fc(torch.cat([latent_representation], dim=-1))
+        #prob = F.gumbel_softmax(out, dim=-1, tau=self.tau, hard=False)
+        prob = F.gumbel_softmax(preds, dim=-1, tau=self.tau, hard=False)
+        print(prob.shape)
+
+        if self.training:
+            final_pred = (preds * prob).sum(dim=-1)
+        else:
+            final_pred = preds[range(len(preds)), prob.argmax(dim=-1)]
+
+        return final_pred, preds, prob
+
+
 class TRAModel(object):
     def __init__(self):
         self.tra = Tra().to(device)
+        self.model = LSTMHA().to(device)
         self.optimizer = torch.optim.Adam(self.tra.parameters(), lr=0.01)
         self.global_step = -1
+        self.lamb = 1
 
     def train_epoch(self, train_data):
+        '''
+        :param train_data: pytorch dataloader
+        :return:
+        '''
         self.tra.train()
+        self.model.train()
         count = 0
         total_loss = 0
         total_count = 0
         max_step = PARAM['max_step_per_epoch']
 
-        for batch in tqdm(train_data, total=max_step):
+        for batch_idx, data in enumerate(train_data):
             count += 1
             if count > max_step:
                 break
             self.global_step += 1
 
-            # data: (batch, N, channel + num_pattern)
-            data, label, index = None, None, None    # click, conver, <uid, time>
-            feature = data[:, :, : -3]  # (batch, N, channel)
-            hist_loss = data[:, : -horizon, -3:]    # (batch, N-horizon, channel)
-
-            hidden = model(feature)
-            pred, all_preds, prob = tra(hidden, hist_loss)
+            # feature: (batch, seq_len, channel)
+            index, feature, label = data[0], data[1], data[2]    # click, conver, <uid, time>
+            hidden = self.model(feature)    # outputs: (batch, seq_len, hidden_size)
+            pred, all_preds, prob = self.tra(hidden)
 
             loss = (pred - label).pow(2).mean()
 
             L = (all_preds.detach() - label[:, None]).pow(2)
             L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
-
-            assign_data(index, L)
-
             if prob is not None:
                 P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
-                lamb = lamb * (rho ** self.global_step)
+                lamb = self.lamb * (PARAM['rho'] ** self.global_step)
                 reg = prob.log().mul(P).sum(dim=-1).mean()
                 loss = loss - lamb * reg
 
@@ -276,46 +257,81 @@ class TRAModel(object):
         return total_loss
 
 
-    def test_epoch(self, data):
-        pass
+    def test_epoch(self, test_data, return_pred=False):
+        self.tra.eval()
+        preds = []
+        metrics = []
+        for idx, data in enumerate(test_data):
+            index, feature, label = data[0], data[1], data[2]
+            with torch.no_grad():
+                hidden = self.model(feature)
+                pred, all_preds, prob = self.tra(hidden)
+
+            L = (all_preds - label[:, None]).pow(2)
+            L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+            X = np.c_[
+                pred.cpu().numpy(),
+                label.cpu().numpy(),
+            ]
+            columns = ["score", "label"]
+            if prob is not None:
+                X = np.c_[X, all_preds.cpu().numpy(), prob.cpu().numpy()]
+                columns += ["score_%d" % d for d in range(all_preds.shape[1])] + [
+                    "prob_%d" % d for d in range(all_preds.shape[1])
+                ]
+
+            pred = pd.DataFrame(X, index=index.cpu().numpy(), columns=columns)
+
+            metrics.append(evaluate(pred))
+            if return_pred:
+                preds.append(pred)
+
+        metrics = pd.DataFrame(metrics)
+        metrics = {
+            "MSE": metrics.MSE.mean(),
+            "MAE": metrics.MAE.mean(),
+            "IC": metrics.IC.mean(),
+            "ICIR": metrics.IC.mean() / metrics.IC.std(),
+        }
+
+        if return_pred:
+            preds = pd.concat(preds, axis=0)
+            preds.index = test_data.restore_index(preds.index)
+            preds.index = preds.index.swaplevel()
+            preds.sort_index(inplace=True)
+
+        return metrics, preds
 
 def main():
 
     static = pd.read_csv('ufeature.csv').set_index('uid')
     dynamic = pd.read_csv('trajectory.csv').set_index('uid')
-    dynamic = dynamic.set_index('time', append=True)
 
-    index = dynamic.index
-    feature = dynamic[['chan0','chan1','chan2','chan3']].values.astype("float32")
-    label = dynamic[['conver']].values.astype("float32")
+    train_dt = dynamic[dynamic['time']<400]
+    test_dt = dynamic[dynamic['time']>=400]
 
-    HData = MyDataset(feature=feature, label=label, index=index)
+    HData_train, HData_test = MyDataset(train_dt), MyDataset(test_dt)
+    train_loader = DataLoader(HData_train, batch_size=10)
+    test_loader = DataLoader(HData_test)
+
     traModel = TRAModel()
 
-    # prepare the data
-    train_set, valid_set, test_set = None, None, None
     # train
     traModel.global_step = -1
-    if PARAM['pattern']>1:
-        traModel.test_epoch(HData)   # initialize the memory
-
     for epoch in range(PARAM['n_epoch']):
         print("Training Epoch: ", epoch)
-        traModel.train_epoch(HData)
-        # during evaluating, the whole memory will be refreshed
-        train_set.clear_memory()
-        train_metrics = traModel.test_epoch(train_set)
-        valid_metrics = traModel.test_epoch(valid_set)
-
-    metrics, preds = traModel.test_epoch(test_set)
+        traModel.train_epoch(train_loader)
+    metrics, preds = traModel.test_epoch(test_loader)
+    print(metrics)
 
 SEED = 100
 set_seed(SEED)
 
 PARAM = {
     'n_epoch': 100,
-    'max_step_per_epoch': 20,
+    'max_step_per_epoch': 200,
     'pattern': 3,
+    'rho': 0.99,
 }
 
 if __name__ == "__main__":
