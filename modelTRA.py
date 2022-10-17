@@ -62,7 +62,9 @@ def evaluate(pred):
     Returns:
 
     '''
-    pred = pred.rank(pct=True)  # transform into percentiles
+
+    #pred = pred.rank(pct=True)  # transform into percentiles
+
     # get the 'score', 'label' column
     score = pred.score
     label = pred.label
@@ -94,11 +96,16 @@ def shoot_infs(inp_tensor):
 def sinkhorn(Q, n_iters=3, epsilon=0.01):
     # epsilon should be adjusted according to logits value's scale
     with torch.no_grad():
-        Q = shoot_infs(Q)
-        Q = torch.exp(Q / epsilon)
+
+        # Q = shoot_infs(Q)
+        #
+        # Q = torch.exp(Q / epsilon)
+        # print(Q)
+        Q=-Q
         for i in range(n_iters):
             Q /= Q.sum(dim=0, keepdim=True)
             Q /= Q.sum(dim=1, keepdim=True)
+        #print(Q)
     return Q
 
 
@@ -164,43 +171,40 @@ class LSTMHA(torch.nn.Module):
     def forward(self, x):
         outputs, _ = self.lstm(x)   # outputs: (batch, seq_len, hidden_size)
         #outputs = outputs.transpose(1,2)  # (batch*stock_num, hidden_size, window_size_K)
-        return outputs
+        return outputs[:,-1,:]
 
 class Tra(torch.nn.Module):
-    def __init__(self, input_size=16, num_states=3, hidden_size=8,):
+    def __init__(self, input_size=16, num_states=3):
         super().__init__()
         self.num_state = num_states
+        self.tau = 1
+        self.training = True
 
         self.router = torch.nn.LSTM(
-            input_size = self.num_state,
-            hidden_size = hidden_size,
+            input_size = input_size,
+            hidden_size = self.num_state,
             num_layers = 1,
             batch_first = True,
         )
-        self.fc = torch.nn.Linear(hidden_size + input_size, num_states)
-        self.predictors = torch.nn.Linear(input_size, num_states)
-
+        # self.fc = torch.nn.Linear(hidden_size + input_size, num_states)
+        self.predictors = torch.nn.Linear(16,3)
 
     def forward(self, hidden):
-        # input: (batch, seq_len, hidden_size)
-        preds = self.predictors(hidden) # input: (batch, seq_len, hidden_size)
+        # input: (batch, hidden)
+        preds = self.predictors(hidden) # preds: (batch, 3)
 
         if self.num_state == 1:
             return preds.squeeze(-1), preds, None
 
-        # information type
-        #router_out, _ = self.router(hist_loss)
-        #latent_representation = hidden
-        #out = self.fc(torch.cat([latent_representation], dim=-1))
-        #prob = F.gumbel_softmax(out, dim=-1, tau=self.tau, hard=False)
+        # prob: (batch, num_state)
         prob = F.gumbel_softmax(preds, dim=-1, tau=self.tau, hard=False)
-        print(prob.shape)
 
         if self.training:
             final_pred = (preds * prob).sum(dim=-1)
         else:
             final_pred = preds[range(len(preds)), prob.argmax(dim=-1)]
 
+        # final_pred: (batch)
         return final_pred, preds, prob
 
 
@@ -210,7 +214,7 @@ class TRAModel(object):
         self.model = LSTMHA().to(device)
         self.optimizer = torch.optim.Adam(self.tra.parameters(), lr=0.01)
         self.global_step = -1
-        self.lamb = 1
+        self.lamb = PARAM['lamb']
 
     def train_epoch(self, train_data):
         '''
@@ -219,49 +223,54 @@ class TRAModel(object):
         '''
         self.tra.train()
         self.model.train()
-        count = 0
-        total_loss = 0
+        self.tra.training = True
+
+        epoch_loss = 0
         total_count = 0
-        max_step = PARAM['max_step_per_epoch']
+
 
         for batch_idx, data in enumerate(train_data):
-            count += 1
-            if count > max_step:
-                break
+            # count += 1
+            # if count > max_step:
+            #     break
             self.global_step += 1
 
             # feature: (batch, seq_len, channel)
             index, feature, label = data[0], data[1], data[2]    # click, conver, <uid, time>
-            hidden = self.model(feature)    # outputs: (batch, seq_len, hidden_size)
-            pred, all_preds, prob = self.tra(hidden)
+            hidden = self.model(feature)    # outputs: (batch, hidden_size)
 
+            pred, all_preds, prob = self.tra(hidden)
             loss = (pred - label).pow(2).mean()
 
             L = (all_preds.detach() - label[:, None]).pow(2)
-            L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+            # print("L before norm:", L)
+            #L -= L.min(dim=-1, keepdim=True).values  # normalize & ensure positive input
+            # print("L after norm:", L)
             if prob is not None:
                 P = sinkhorn(-L, epsilon=0.01)  # sample assignment matrix
                 lamb = self.lamb * (PARAM['rho'] ** self.global_step)
                 reg = prob.log().mul(P).sum(dim=-1).mean()
                 loss = loss - lamb * reg
-
             loss.backward()
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            total_loss += loss.item()
+            epoch_loss += loss.item()
             total_count += len(pred)
 
-        total_loss /= total_count
 
-        return total_loss
+        epoch_loss /= total_count
+
+        return epoch_loss
 
 
     def test_epoch(self, test_data, return_pred=False):
         self.tra.eval()
+        self.tra.training = False
         preds = []
         metrics = []
         for idx, data in enumerate(test_data):
+            #print(idx)
             index, feature, label = data[0], data[1], data[2]
             with torch.no_grad():
                 hidden = self.model(feature)
@@ -283,22 +292,12 @@ class TRAModel(object):
             pred = pd.DataFrame(X, index=index.cpu().numpy(), columns=columns)
 
             metrics.append(evaluate(pred))
-            if return_pred:
-                preds.append(pred)
 
         metrics = pd.DataFrame(metrics)
         metrics = {
             "MSE": metrics.MSE.mean(),
             "MAE": metrics.MAE.mean(),
-            "IC": metrics.IC.mean(),
-            "ICIR": metrics.IC.mean() / metrics.IC.std(),
         }
-
-        if return_pred:
-            preds = pd.concat(preds, axis=0)
-            preds.index = test_data.restore_index(preds.index)
-            preds.index = preds.index.swaplevel()
-            preds.sort_index(inplace=True)
 
         return metrics, preds
 
@@ -311,7 +310,7 @@ def main():
     test_dt = dynamic[dynamic['time']>=400]
 
     HData_train, HData_test = MyDataset(train_dt), MyDataset(test_dt)
-    train_loader = DataLoader(HData_train, batch_size=10)
+    train_loader = DataLoader(HData_train, batch_size=256)
     test_loader = DataLoader(HData_test)
 
     traModel = TRAModel()
@@ -319,8 +318,8 @@ def main():
     # train
     traModel.global_step = -1
     for epoch in range(PARAM['n_epoch']):
-        print("Training Epoch: ", epoch)
-        traModel.train_epoch(train_loader)
+        epoch_loss = traModel.train_epoch(train_loader)
+        print("Finish Training Epoch: ", epoch, " Loss: ", epoch_loss)
     metrics, preds = traModel.test_epoch(test_loader)
     print(metrics)
 
@@ -328,10 +327,10 @@ SEED = 100
 set_seed(SEED)
 
 PARAM = {
-    'n_epoch': 100,
-    'max_step_per_epoch': 200,
-    'pattern': 3,
-    'rho': 0.99,
+    'n_epoch': 10,  # default: 50
+    'pattern': 3,   # default: 3
+    'rho': 0.99,    # default: 0.99
+    'lamb': 0,      # default: 1
 }
 
 if __name__ == "__main__":
