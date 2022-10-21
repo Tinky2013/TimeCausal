@@ -327,7 +327,7 @@ SEED = 100
 set_seed(SEED)
 
 PARAM = {
-    'n_epoch': 10,  # default: 50
+    'n_epoch': 5,  # default: 50
     'pattern': 3,   # default: 3
     'rho': 0.99,    # default: 0.99
     'lamb': 0,      # default: 1
